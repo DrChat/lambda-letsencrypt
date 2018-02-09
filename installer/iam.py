@@ -18,10 +18,10 @@ def generate_policy_document(s3buckets=None, snstopicarn=None):
     policy_template['Statement'][3]['Resource'] = bucketresources
 
     if snstopicarn:
-        policy_template['Statement'][4]['Resource'] = [snstopicarn]
+        policy_template['Statement'][5]['Resource'] = [snstopicarn]
     else:
         # don't need sns statement if there's no topic
-        del policy_template['Statement'][4]
+        del policy_template['Statement'][5]
     return json.dumps(policy_template, indent=4)
 
 

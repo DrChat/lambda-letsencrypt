@@ -50,6 +50,16 @@
             "Resource": []
         },
         {
+            "Sid": "events",
+            "Effect": "Allow",
+            "Action": [
+                "events:PutRule"
+            ],
+            "Resource": [
+                "*"
+            ]
+        },
+        {
             "Sid": "snspublish",
             "Effect": "Allow",
             "Action": [

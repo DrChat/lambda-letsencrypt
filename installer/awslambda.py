@@ -7,7 +7,7 @@ def create_function(name, iam_role, archive, handler='lambda_function.lambda_han
     with open(archive, 'rb') as f:
         contents = f.read()
     try:
-        lambda_c.create_function(
+        res = lambda_c.create_function(
             FunctionName=name,
             Runtime='python2.7',
             Role=iam_role,
@@ -22,18 +22,16 @@ def create_function(name, iam_role, archive, handler='lambda_function.lambda_han
         )
     except Exception as e:
         print(e)
-        return False
+        return None
 
-    return True
+    return res['FunctionArn']
 
 
-def list_distributions():
-    dl = cloudfront_c.list_distributions()
-    ret = []
-    for dist in dl['DistributionList']['Items']:
-        ret.append({
-            'Id': dist['Id'],
-            'Comment': dist['Comment'],
-            'Aliases': dist['Aliases'].get('Items', [])
-        })
-    return ret
+def add_event_permission(name, rule_name, rule_arn):
+    lambda_c.add_permission(
+        FunctionName=name,
+        StatementId="{0}-Event".format(rule_name),
+        Action='lambda:InvokeFunction',
+        Principal='events.amazonaws.com',
+        SourceArn=rule_arn,
+    )

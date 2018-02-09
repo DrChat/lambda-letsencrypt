@@ -30,6 +30,7 @@ iam = boto3.client('iam', region_name=cfg.AWS_REGION)
 sns = boto3.client('sns', region_name=cfg.AWS_REGION)
 elb = boto3.client('elb', region_name=cfg.AWS_REGION)
 route53 = boto3.client('route53', region_name=cfg.AWS_REGION)
+events = boto3.client('events', region_name=cfg.AWS_REGION)
 
 # Internal files to store user/authorization information
 USERFILE = 'letsencrypt_user.json'
@@ -83,7 +84,7 @@ def get_user():
 
 
 def notify_email(subject, message):
-    if cfg.SNS_TOPIC_ARN:
+    if cfg.SNS_TOPIC_ARN is not "None":
         logger.info("Sending notification")
         sns.publish(
             TopicArn=cfg.SNS_TOPIC_ARN,
@@ -157,8 +158,7 @@ def route53_challenge_verifier(domain, token, keyauth):
 
 
 def authorize_domain(user, domain):
-    authzrfilename = 'authzr-{}.json'.format(domain)
-    authzrfile = load_file(domain['DOMAIN'], authzrfilename)
+    authzrfile = load_file(domain['DOMAIN'], AUTHZRFILE)
     if authzrfile is not False:
         authzr = AcmeAuthorization.unserialize(user, authzrfile)
     else:
@@ -166,7 +166,7 @@ def authorize_domain(user, domain):
     status = authzr.authorize()
 
     # save the (new/updated) authorization response
-    save_file(domain['DOMAIN'], authzrfilename, authzr.serialize())
+    save_file(domain['DOMAIN'], AUTHZRFILE, authzr.serialize())
     logger.debug(authzr.serialize())
 
     # see if we're done
@@ -189,7 +189,7 @@ def authorize_domain(user, domain):
         return False
     elif status == 'valid':
         logger.info("Got domain authorization for: {}".format(domain['DOMAIN']))
-        return authzr
+        return True
     else:  # probably failed the challenge
         logger.warn("Some error happend with authz request for '{}'(review above messages)".format(domain['DOMAIN']))
         logger.warn("Will retry again next time this runs")
@@ -251,7 +251,7 @@ def iam_delete_cert(arn=None, cert_id=None):
             break
 
 
-def iam_check_expiration(arn=None, cert_id=None):
+def iam_get_expiration(arn=None, cert_id=None):
     allcerts = iam.list_server_certificates(PathPrefix="/cloudfront/")
     expiration = None
     cert = None
@@ -261,7 +261,8 @@ def iam_check_expiration(arn=None, cert_id=None):
             break
     if not cert:
         # no expiration found?
-        return True
+        return None
+
     expiration = cert['Expiration']
     time_left = expiration - datetime.datetime.now(tz=tzutc())
 
@@ -275,16 +276,15 @@ means the lambda function that is supposed to be handling the renewal is
 failing. Please check the logs for it. Attempting to renew now.
 """.format(cert['ServerCertificateName'])
         )
-        return True
     elif time_left.days < 30:
         logger.info("Only {} days remaining, will proceed with renewal for {}".format(time_left.days, cert['ServerCertificateName']))
-        return True
     else:
         logger.info("{} days remaining on cert, nothing to do for {}.".format(time_left.days, cert['ServerCertificateName']))
-        return False
+
+    return expiration
 
 
-def is_elb_cert_expiring(site):
+def get_elb_cert_expiration(site):
     return True
     try:
         load_balancers = elb.describe_load_balancers(
@@ -306,27 +306,28 @@ def is_elb_cert_expiring(site):
                 currentcert_arn = listener['Listener']['SSLCertificateId']
     if currentcert_arn is None:
         logger.info("No certificate exists for elb name {}".format(site['ELB_NAME']))
-    return iam_check_expiration(arn=currentcert_arn)
+    return iam_get_expiration(arn=currentcert_arn)
 
 
-def is_cf_cert_expiring(site):
+def get_cf_cert_expiration(site):
     cf_config = cloudfront.get_distribution_config(Id=site['CLOUDFRONT_ID'])
     currentcert = cf_config['DistributionConfig']['ViewerCertificate'].get('IAMCertificateId', None)
 
     if currentcert is None:
         logger.info("No certificate exists for {}".format(site['CLOUDFRONT_ID']))
-        return True
+        return None
 
-    return iam_check_expiration(cert_id=currentcert)
+    return iam_get_expiration(cert_id=currentcert)
 
 
-def is_domain_expiring(site):
+def get_domain_expiration(site):
     if 'CLOUDFRONT_ID' in site:
-        return is_cf_cert_expiring(site)
+        return get_cf_cert_expiration(site)
     if 'ELB_NAME' in site:
-        return is_elb_cert_expiring(site)
+        return get_elb_cert_expiration(site)
+
     logger.error("Can't detect site type(ELB or CLOUDFRONT)")
-    return False
+    return None
 
 
 def configure_cert(site, cert, key, chain):
@@ -467,10 +468,11 @@ def configure_cloudfront(domain, s3bucket):
         quantity = cf_config['DistributionConfig']['Origins'].get('Quantity', 0)
         cf_config['DistributionConfig']['Origins']['Quantity'] = quantity + 1
         cf_config['DistributionConfig']['Origins']['Items'].append({
-            'DomainName': '{}.s3.amazonaws.com'.format(s3bucket),
             'Id': 'lambda-letsencrypt-challenges',
+            'DomainName': '{}.s3.amazonaws.com'.format(s3bucket),
             'OriginPath': "/{}".format(domain['CLOUDFRONT_ID']),
-            'S3OriginConfig': {u'OriginAccessIdentity': ''}
+            'S3OriginConfig': {u'OriginAccessIdentity': ''},
+            'CustomHeaders': {u'Quantity': 0}
         })
 
     # now check for the behavior rule
@@ -493,7 +495,8 @@ def configure_cloudfront(domain, s3bucket):
             'ForwardedValues': {
                 u'Cookies': {u'Forward': 'none'},
                 'Headers': {'Quantity': 0},
-                'QueryString': False
+                'QueryString': False,
+                'QueryStringCacheKeys': {u'Quantity': 0}
             },
             'MaxTTL': 31536000,
             'MinTTL': 0,
@@ -502,7 +505,10 @@ def configure_cloudfront(domain, s3bucket):
             'TargetOriginId': 'lambda-letsencrypt-challenges',
             'TrustedSigners': {u'Enabled': False, 'Quantity': 0},
             'ViewerProtocolPolicy': 'allow-all',
-            'Compress': False
+            'Compress': False,
+            'LambdaFunctionAssociations': {
+                u'Quantity': 0
+            }
         })
         quantity = cf_config['DistributionConfig']['CacheBehaviors'].get('Quantity', 0)
         cf_config['DistributionConfig']['CacheBehaviors']['Quantity'] = quantity + 1
@@ -542,6 +548,11 @@ def site_id(site):
         return 'elb-{}'.format(site['ELB_NAME'])
 
 
+def reschedule_date(rule_name, next_time):
+    # Parse the date into a cron string.
+    sched = "cron(0 0 {} {} ? {})".format(next_time.day, next_time.month, next_time.year)
+    events.put_rule(Name=rule_name, ScheduleExpression=sched)
+
 def lambda_handler(event, context):
     action_needed = False
     # Do a few sanity checks
@@ -556,14 +567,40 @@ def lambda_handler(event, context):
         return False
 
     # check the certificates we want issued
+    soonest_expiration = None
     for site in cfg.SITES:
-        if not is_domain_expiring(site):
+        expiration = get_domain_expiration(site)
+        if expiration is None:
+            # No expiration date found.
+            action_needed = True
+            continue
+
+        time_left = expiration - datetime.datetime.now(tz=tzutc())
+        if soonest_expiration is not None:
+            if expiration < soonest_expiration:
+                soonest_expiration = expiration
+        else:
+            soonest_expiration = expiration
+
+        # Expiring far enough in the future to skip.
+        if time_left.days > 30:
             site['skip'] = True
             continue
+
         action_needed = True
 
     # quit if there's nothing to do
     if not action_needed:
+        if soonest_expiration is not None:
+            next_time = soonest_expiration - datetime.timedelta(days=30)
+
+            logger.info("Rescheduling to run on {}".format(next_time.isoformat(' ')))
+            reschedule_date(cfg.TRIGGER_RULE_NAME, next_time)
+        else:
+            # Set back to a rate of 1 day
+            logger.info("Scheduling for daily invocation.")
+            events.put_rule(Name=cfg.TRIGGER_RULE_NAME, ScheduleExpression="rate(1 day)")
+
         return False
 
     # get our user key to use with lets-encrypt
@@ -576,6 +613,7 @@ def lambda_handler(event, context):
         if 'http-01' in domain['VALIDATION_METHODS']:
             configure_cloudfront(domain, cfg.S3CHALLENGEBUCKET)
 
+        logger.info("Attempting to authorize domain \"{}\"".format(domain['DOMAIN']))
         authzr = authorize_domain(user, domain)
         if authzr:
             my_domains.append(domain['DOMAIN'])
@@ -606,6 +644,9 @@ def lambda_handler(event, context):
                              "Please review the logs in cloudwatch.")
         except Exception as e:
             logger.warning(e)
+    
+    logger.info("Scheduling for daily invocation.")
+    events.put_rule(Name=cfg.TRIGGER_RULE_NAME, ScheduleExpression="rate(1 day)")
 
 # Support running directly for testing
 if __name__ == '__main__':

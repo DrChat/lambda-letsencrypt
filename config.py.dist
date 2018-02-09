@@ -11,6 +11,9 @@ AWS_REGION = 'us-east-1'
 # The SNS topic to send messages to(Set to None to disable)
 SNS_TOPIC_ARN = "$SNS_ARN"
 
+# The name of the trigger rule for the lambda
+TRIGGER_RULE_NAME = "$TRIGGER_RULE_NAME"
+
 # S3 Bucket where we'll store the Lets-Encrypt user key and necessary files
 # These files will be stored in a subdomain
 S3CONFIGBUCKET = "$S3_CONFIG_BUCKET"

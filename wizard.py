@@ -21,7 +21,7 @@ import zipfile
 from docopt import docopt
 from string import Template
 
-from installer import sns, cloudfront, iam, s3, awslambda, elb, route53
+from installer import sns, cloudfront, iam, s3, awslambda, elb, route53, events
 
 
 class colors:
@@ -417,6 +417,11 @@ def wizard_save_config(global_config):
         )
         iam_arn = iam.configure(global_config['iam_role_name'], policy_document)
 
+        print("    Waiting 10 seconds for role to propagate...")
+        time.sleep(10)
+
+
+    templatevars['TRIGGER_RULE_NAME'] = "lambda-letsencrypt-trigger"
     templatevars['S3_CONFIG_BUCKET'] = global_config['s3_cfg_bucket']
     templatevars['S3_CHALLENGE_BUCKET'] = global_config['s3_challenge_bucket']
 
@@ -457,24 +462,31 @@ def wizard_save_config(global_config):
     iam_arn = iam.get_arn(global_config['iam_role_name'])
     print("    IAM ARN: {}".format(iam_arn))
     print("    Uploading Function ", end='')
-    if awslambda.create_function("lambda-letsencrypt", iam_arn, 'lambda-letsencrypt-dist.zip'):
+    lambda_arn = awslambda.create_function("lambda-letsencrypt", iam_arn, 'lambda-letsencrypt-dist.zip')
+    if lambda_arn is not None:
         print(colors.OKGREEN + u'\u2713' + colors.ENDC)
     else:
         print(colors.FAIL + u'\u2717' + colors.ENDC)
         return
 
-    print_header("Schedule Lambda Function")
-    write_str("I've done all I can for you now, there's one last step you have to take manually in order to schedule your lambda function to run once a day.")
-    write_str("Log into your aws console and go to this page:")
-    lambda_event_url = "https://console.aws.amazon.com/lambda/home#/functions/lambda-letsencrypt?tab=eventSources"
-    print(colors.OKBLUE + lambda_event_url + colors.ENDC)
-    print()
-    write_str('Click on "Add event source". From the dropdown, choose "Scheduled Event". Enter the following:')
-    write_str("Name:                 'daily - rate(1 day)'")
-    write_str("Description:          'Run every day'")
-    write_str("Schedule Expression:  'rate(1 day)'")
-    print()
-    write_str("Choose to 'Enable Now', then click 'Submit'")
+    print("Scheduling Lambda Function:")
+    rule_arn = events.put_rule("lambda-letsencrypt-trigger", "rate(1 day)", "Trigger for letsencrypt update")
+    awslambda.add_event_permission('lambda-letsencrypt', 'lambda-letsencrypt-trigger', rule_arn)
+    events.put_target('lambda-letsencrypt-trigger', lambda_arn)
+    print(colors.OKGREEN + u'\u2713' + colors.ENDC)
+
+    # print_header("Schedule Lambda Function")
+    # write_str("I've done all I can for you now, there's one last step you have to take manually in order to schedule your lambda function to run once a day.")
+    # write_str("Log into your aws console and go to this page:")
+    # lambda_event_url = "https://console.aws.amazon.com/lambda/home#/functions/lambda-letsencrypt?tab=eventSources"
+    # print(colors.OKBLUE + lambda_event_url + colors.ENDC)
+    # print()
+    # write_str('Click on "Add event source". From the dropdown, choose "Scheduled Event". Enter the following:')
+    # write_str("Name:                 'daily - rate(1 day)'")
+    # write_str("Description:          'Run every day'")
+    # write_str("Schedule Expression:  'rate(1 day)'")
+    # print()
+    # write_str("Choose to 'Enable Now', then click 'Submit'")
 
     print_header("Testing")
     write_str("You may want to test this before you set it to be recurring. Click on the 'Test' button in the AWS Console for the lambda-letsencrypt function. The data you provide to this function does not matter. Make sure to review the logs after it finishes and check for anything out of the ordinary.")
@@ -483,8 +495,7 @@ def wizard_save_config(global_config):
 
 
 def wizard(global_config):
-    ts = int(time.time())
-    ts = 1000
+    ts = int(time.time()) % 100000
     global_config['ts'] = ts
     print_header("Lambda Lets-Encrypt Wizard")
     write_str("""\
@@ -503,14 +514,6 @@ def wizard(global_config):
     """)
 
     print()
-    print(colors.WARNING + "WARNING: ")
-    write_str("""\
-        Manual configuration is required at this time to configure the Lambda
-        function to run on a daily basis to keep your certificate updated. If
-        you do not follow the steps provided at the end of this wizard your
-        Lambda function will *NOT* run.
-    """)
-    print(colors.ENDC)
 
     wizard_sns(global_config)
     wizard_iam(global_config)

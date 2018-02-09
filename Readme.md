@@ -40,7 +40,7 @@ going on you can follow the steps to configure it manually.
     * ask you a few questions about your desired set up
     * create a configuration file 
     * upload the lambda function for you
-    * help you manually configure the lambda's daily scheduling (this can't be done automatically because there's no API yet)
+    * create a schedule to automatically run the lambda function
 
 ### Manual Setup
 More docs coming soon.
@@ -51,7 +51,7 @@ This works by running a Lambda function once per day which will check
 your certificate's expiration, and renew it if it is nearing expiration.
 
 Since Lambda is billed in 100ms increments and this only needs to run once a day
-for less than 10seconds each time the cost to run this is less than a
+while renewing for less than 10seconds each time the cost to run this is less than a
 penny per month(i.e. effectively free)
 
 ## But I only have a static S3 website, how do I use this?
